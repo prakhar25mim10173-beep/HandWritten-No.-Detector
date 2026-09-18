@@ -1,13 +1,12 @@
 import streamlit as st
 from PIL import Image
+import cv2
 
 from predict import predict_digit, predict_digits
 from equation import solve_equation, format_equation
 
 
-# --------------------------------------------------
 # PAGE CONFIGURATION
-# --------------------------------------------------
 
 st.set_page_config(
     page_title="Handwritten Math AI",
@@ -16,9 +15,7 @@ st.set_page_config(
 )
 
 
-# --------------------------------------------------
 # HEADER
-# --------------------------------------------------
 
 st.title("🧮 Handwritten Math AI")
 
@@ -30,9 +27,7 @@ st.write(
 st.divider()
 
 
-# --------------------------------------------------
 # SIDEBAR
-# --------------------------------------------------
 
 st.sidebar.title("⚙️ Recognition Mode")
 
@@ -46,9 +41,7 @@ mode = st.sidebar.radio(
 )
 
 
-# ==================================================
 # SINGLE DIGIT MODE
-# ==================================================
 
 if mode == "🔢 Single Digit":
 
@@ -89,9 +82,7 @@ if mode == "🔢 Single Digit":
             )
 
 
-# ==================================================
 # MULTIPLE DIGIT MODE
-# ==================================================
 
 elif mode == "🔢 Multiple Digits":
 
@@ -104,6 +95,12 @@ elif mode == "🔢 Multiple Digits":
     uploaded_file = st.file_uploader(
         "Upload image",
         type=["png", "jpg", "jpeg"]
+    )
+
+    show_debug = st.checkbox(
+        "Show segmentation debug view "
+        "(binary image, bounding boxes, per-digit crops)",
+        value=False
     )
 
     if uploaded_file:
@@ -120,8 +117,67 @@ elif mode == "🔢 Multiple Digits":
 
             try:
 
-                # Get predictions
-                results = predict_digits(image)
+                results, debug_info = predict_digits(image, debug=show_debug)
+
+                # DEBUG PANEL
+                if show_debug and debug_info is not None:
+
+                    st.subheader("🔍 Segmentation Debug")
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.markdown("**Full binarized image**")
+                        st.image(
+                            debug_info["binary_full"],
+                            use_container_width=True,
+                            clamp=True
+                        )
+
+                    with col2:
+                        st.markdown("**Detected writing line (after closing)**")
+                        st.image(
+                            debug_info["line_closed"],
+                            use_container_width=True,
+                            clamp=True
+                        )
+
+                    st.markdown("**Bounding boxes on full image**")
+                    st.image(
+                        cv2.cvtColor(debug_info["boxes_drawn"], cv2.COLOR_BGR2RGB),
+                        use_container_width=True
+                    )
+
+                    st.write(
+                        f"Raw connected components found: "
+                        f"**{debug_info['num_raw_components']}**  \n"
+                        f"Final digit boxes after filtering + merging: "
+                        f"**{debug_info['num_final_digits']}**"
+                    )
+
+                    if debug_info["num_raw_components"] != debug_info["num_final_digits"]:
+                        st.info(
+                            "Raw components and final boxes differ, meaning the "
+                            "area/height filtering or box-merging step changed the "
+                            "count. If the final number still doesn't match what you "
+                            "wrote, that tells us which stage to adjust next."
+                        )
+
+                    if debug_info.get("crops"):
+                        st.markdown("**Individual crops sent to the CNN**")
+                        crop_cols = st.columns(len(debug_info["crops"]))
+                        for i, crop in enumerate(debug_info["crops"]):
+                            with crop_cols[i]:
+                                st.image(
+                                    crop,
+                                    caption=f"Crop {i + 1}",
+                                    use_container_width=True,
+                                    clamp=True
+                                )
+
+                    st.divider()
+
+                # NORMAL RESULTS
 
                 st.subheader("Detected Digits")
 
@@ -147,10 +203,7 @@ elif mode == "🔢 Multiple Digits":
 
                 st.error(str(e))
 
-
-# ==================================================
 # EQUATION MODE
-# ==================================================
 
 else:
 
@@ -197,10 +250,7 @@ else:
                     f"❌ {error}"
                 )
 
-
-# --------------------------------------------------
 # FOOTER
-# --------------------------------------------------
 
 st.divider()
 
