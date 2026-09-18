@@ -48,9 +48,7 @@ def preprocess_digit(digit):
     return digit
 
 
-# -------------------------------------------------
 # SINGLE DIGIT
-# -------------------------------------------------
 
 def predict_digit(image):
     """Predict one handwritten digit."""
@@ -70,8 +68,7 @@ def predict_digit(image):
         0
     )
 
-    # Convert digit to white
-    # and background to black
+    # Convert digit to white and background to black
     binary = cv2.threshold(
         gray,
         0,
@@ -170,13 +167,64 @@ def predict_digit(image):
         round(float(confidence), 2)
     )
 
-
-# -------------------------------------------------
 # MULTIPLE DIGITS
-# -------------------------------------------------
 
-def segment_digits(image):
-    """Detect digits from the main handwritten line."""
+def _boxes_overlap_horizontally(box_a, box_b, min_overlap_ratio=0.5):
+    ax, ay, aw, ah = box_a
+    bx, by, bw, bh = box_b
+    left = max(ax, bx)
+    right = min(ax + aw, bx + bw)
+    overlap = max(0, right - left)
+    smaller_width = min(aw, bw)
+    if smaller_width == 0:
+        return False
+    return (overlap / smaller_width) >= min_overlap_ratio
+
+
+def _boxes_overlap_vertically(box_a, box_b, min_overlap_ratio=0.2):
+    ax, ay, aw, ah = box_a
+    bx, by, bw, bh = box_b
+    top = max(ay, by)
+    bottom = min(ay + ah, by + bh)
+    overlap = max(0, bottom - top)
+    smaller_height = min(ah, bh)
+    if smaller_height == 0:
+        return False
+    return (overlap / smaller_height) >= min_overlap_ratio
+
+
+def _merge_overlapping_boxes(boxes):
+
+    boxes = list(boxes)
+    merged_any = True
+    while merged_any:
+        merged_any = False
+        result = []
+        used = [False] * len(boxes)
+        for i in range(len(boxes)):
+            if used[i]:
+                continue
+            current = boxes[i]
+            for j in range(i + 1, len(boxes)):
+                if used[j]:
+                    continue
+                if _boxes_overlap_horizontally(current, boxes[j]) and \
+                   _boxes_overlap_vertically(current, boxes[j]):
+                    cx, cy, cw, ch = current
+                    ox, oy, ow, oh = boxes[j]
+                    nx = min(cx, ox)
+                    ny = min(cy, oy)
+                    nx2 = max(cx + cw, ox + ow)
+                    ny2 = max(cy + ch, oy + oh)
+                    current = (nx, ny, nx2 - nx, ny2 - ny)
+                    used[j] = True
+                    merged_any = True
+            result.append(current)
+        boxes = result
+    return boxes
+
+
+def segment_digits(image, debug=False):
 
     image = np.array(image)
 
@@ -187,16 +235,15 @@ def segment_digits(image):
     )
 
     # Reduce camera noise
-    gray = cv2.GaussianBlur(
+    gray_blurred = cv2.GaussianBlur(
         gray,
         (5, 5),
         0
     )
 
-    # Adaptive threshold works better
-    # with uneven lighting
+    # Adaptive threshold works better with uneven lighting
     binary = cv2.adaptiveThreshold(
-        gray,
+        gray_blurred,
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV,
@@ -204,15 +251,12 @@ def segment_digits(image):
         10
     )
 
-    # -----------------------------------------
     # FIND THE MAIN HORIZONTAL WRITING LINE
-    # -----------------------------------------
 
     row_counts = np.sum(binary > 0, axis=1)
 
     max_count = np.max(row_counts)
 
-    # Rows containing significant handwriting
     threshold = max(
         5,
         max_count * 0.30
@@ -220,9 +264,7 @@ def segment_digits(image):
 
     active_rows = row_counts > threshold
 
-    # Find groups of consecutive active rows
     groups = []
-
     start = None
 
     for i, active in enumerate(active_rows):
@@ -246,7 +288,6 @@ def segment_digits(image):
             "Could not find the handwritten digits."
         )
 
-    # Choose the group with the most ink
     best_group = max(
         groups,
         key=lambda g: np.sum(
@@ -256,92 +297,125 @@ def segment_digits(image):
 
     y1, y2 = best_group
 
-    # Add vertical padding
     padding_y = 15
 
-    y1 = max(
-        0,
-        y1 - padding_y
-    )
-
-    y2 = min(
-        binary.shape[0],
-        y2 + padding_y
-    )
+    y1 = max(0, y1 - padding_y)
+    y2 = min(binary.shape[0], y2 + padding_y)
 
     # Crop to the writing line
     line = binary[y1:y2, :]
 
-    # -----------------------------------------
-    # REMOVE SMALL NOISE
-    # -----------------------------------------
+    # BRIDGE SMALL GAPS (close, not open)
 
-    kernel = np.ones(
-        (3, 3),
-        np.uint8
-    )
-
-    line = cv2.morphologyEx(
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    line_closed = cv2.morphologyEx(
         line,
-        cv2.MORPH_OPEN,
-        kernel,
+        cv2.MORPH_CLOSE,
+        close_kernel,
         iterations=1
     )
 
-    # -----------------------------------------
     # FIND DIGIT CONTOURS
-    # -----------------------------------------
 
     contours, _ = cv2.findContours(
-        line,
+        line_closed,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
 
-    boxes = []
+    raw_boxes = [cv2.boundingRect(c) for c in contours]
+    num_raw_components = len(raw_boxes)
 
-    for contour in contours:
-
-        x, y, w, h = cv2.boundingRect(
-            contour
+    if not raw_boxes:
+        raise ValueError(
+            "Could not find the handwritten digits."
         )
 
-        area = cv2.contourArea(contour)
+    # ADAPTIVE AREA FILTER (relative to this image's median)
 
-        # Ignore tiny noise
-        if area < 40:
-            continue
+    areas = [w * h for (x, y, w, h) in raw_boxes]
+    median_area = float(np.median(areas))
+    area_floor = max(20.0, median_area * 0.15)
 
-        # Ignore tiny objects
-        if w < 8 or h < 15:
-            continue
+    area_filtered = [b for b, a in zip(raw_boxes, areas) if a >= area_floor]
+    if not area_filtered:
+        area_filtered = raw_boxes
 
-        # Ignore extremely wide objects
-        if w > line.shape[1] * 0.25:
-            continue
+    # ADAPTIVE HEIGHT FILTER (relative to tallest surviving box)
 
-        # Ignore extremely tall objects
-        if h > line.shape[0] * 0.95:
-            continue
+    max_height = max(h for (x, y, w, h) in area_filtered)
+    height_filtered = [
+        b for b in area_filtered
+        if b[3] >= max_height * 0.25
+    ]
+    if not height_filtered:
+        height_filtered = area_filtered
 
-        boxes.append(
-            (x, y + y1, w, h)
-        )
+    line_width = line.shape[1]
+    width_filtered = [
+        b for b in height_filtered
+        if b[2] <= line_width * 0.5
+    ]
+    if not width_filtered:
+        width_filtered = height_filtered
 
-    # -----------------------------------------
-    # SORT LEFT -> RIGHT
-    # -----------------------------------------
+    # MERGE FRAGMENTS OF THE SAME DIGIT
 
-    boxes.sort(
-        key=lambda box: box[0]
-    )
+    merged = _merge_overlapping_boxes(width_filtered)
 
-    return binary, boxes
+    # SORT LEFT -> RIGHT, RE-APPLY Y OFFSET
 
-def predict_digits(image):
+    merged.sort(key=lambda box: box[0])
+
+    boxes = [
+        (x, y + y1, w, h)
+        for (x, y, w, h) in merged
+    ]
+
+    debug_info = None
+
+    if debug:
+        boxes_drawn = cv2.cvtColor(binary.copy(), cv2.COLOR_GRAY2BGR)
+        for (x, y, w, h) in boxes:
+            cv2.rectangle(boxes_drawn, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+        debug_info = {
+            "gray": gray,
+            "binary_full": binary,
+            "line_region": line,
+            "line_closed": line_closed,
+            "boxes_drawn": boxes_drawn,
+            "num_raw_components": num_raw_components,
+            "num_final_digits": len(boxes),
+            "y_range": (y1, y2),
+        }
+
+    return binary, boxes, debug_info
+
+
+def _adaptive_horizontal_padding(boxes, index, base_padding=15):
+
+    x, y, w, h = boxes[index]
+
+    left_pad = base_padding
+    if index > 0:
+        prev_x, prev_y, prev_w, prev_h = boxes[index - 1]
+        gap = x - (prev_x + prev_w)
+        left_pad = min(base_padding, max(0, gap // 2))
+
+    right_pad = base_padding
+    if index < len(boxes) - 1:
+        next_x, next_y, next_w, next_h = boxes[index + 1]
+        gap = next_x - (x + w)
+        right_pad = min(base_padding, max(0, gap // 2))
+
+    return left_pad, right_pad
+
+
+def predict_digits(image, debug=False):
     """Predict multiple handwritten digits."""
 
-    binary, boxes = segment_digits(image)
+    binary, boxes, debug_info = segment_digits(image, debug=debug)
 
     if len(boxes) == 0:
         raise ValueError(
@@ -350,61 +424,40 @@ def predict_digits(image):
         )
 
     results = []
+    debug_crops = [] if debug else None
 
-    for x, y, w, h in boxes:
+    for i, (x, y, w, h) in enumerate(boxes):
 
-        padding = 15
+        vertical_padding = 15
+        left_pad, right_pad = _adaptive_horizontal_padding(boxes, i, base_padding=15)
 
-        x1 = max(
-            0,
-            x - padding
-        )
+        x1 = max(0, x - left_pad)
+        y1 = max(0, y - vertical_padding)
+        x2 = min(binary.shape[1], x + w + right_pad)
+        y2 = min(binary.shape[0], y + h + vertical_padding)
 
-        y1 = max(
-            0,
-            y - padding
-        )
+        digit = binary[y1:y2, x1:x2]
 
-        x2 = min(
-            binary.shape[1],
-            x + w + padding
-        )
+        if debug:
+            debug_crops.append(digit)
 
-        y2 = min(
-            binary.shape[0],
-            y + h + padding
-        )
-
-        digit = binary[
-            y1:y2,
-            x1:x2
-        ]
-
-        processed = preprocess_digit(
-            digit
-        )
+        processed = preprocess_digit(digit)
 
         probabilities = model.predict(
             processed,
             verbose=0
         )[0]
 
-        prediction = int(
-            np.argmax(probabilities)
-        )
-
-        confidence = (
-            probabilities[prediction]
-            * 100
-        )
+        prediction = int(np.argmax(probabilities))
+        confidence = probabilities[prediction] * 100
 
         results.append({
             "digit": prediction,
-            "confidence": round(
-                float(confidence),
-                2
-            ),
+            "confidence": round(float(confidence), 2),
             "box": (x, y, w, h)
         })
 
-    return results
+    if debug and debug_info is not None:
+        debug_info["crops"] = debug_crops
+
+    return results, debug_info
