@@ -208,16 +208,6 @@ The CNN was selected for the final image-recognition pipeline because convolutio
 - Multi-digit recognition depends on successful character segmentation.
 - The current equation solver is typed rather than handwritten.
 
-// Future Work
-
-- Improve background and notebook-line removal.
-- Add bounding boxes around detected digits.
-- Train using more real-world photographed handwriting.
-- Add recognition for mathematical operators.
-- Build a complete handwritten equation recognition pipeline.
-- Add uncertainty thresholds for low-confidence predictions.
-- Deploy the application online.
-
 // Technologies
 
 - Python
@@ -229,7 +219,7 @@ The CNN was selected for the final image-recognition pipeline because convolutio
 - scikit-learn
 - Matplotlib
 
-// Academic Project
+// Conclusion
 
 Project: Handwritten Digit Recognition  
 Category: Machine Learning / Computer Vision  
@@ -238,6 +228,3 @@ Primary Model: Convolutional Neural Network
 Dataset: MNIST  
 Final MNIST Test Accuracy: 99.33%
 
-// License
-
-This repository is intended as an educational/student project.
